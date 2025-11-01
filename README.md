@@ -16,7 +16,9 @@ $ nextflow run DASVA/main.nf --output_dir ./ --help
 ```
 Profiles:
 ```bash
--profile docker or -profile singularity; (for slurm) -profile slurm,singularity or -profile slurm,docker; or -profile awsbatch (not fully tested yet)
+-profile docker or -profile singularity;
+(for slurm) -profile slurm,singularity or -profile slurm,docker;
+(for aws) -profile awsbatch (not fully tested yet)
 ```
 ```bash
 Usage: nextflow run main.nf [options]
