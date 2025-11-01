@@ -3,3 +3,32 @@
 
 The pipeline is built using [Nextflow](https://www.nextflow.io/), a bioinformatics workflow manager that enables the development of portable and reproducible workflows. 
 There are docker images available from [DockerHub](https://hub.docker.com/r/staphb/flye/tags); [DockerHub](https://hub.docker.com/r/mkolmogo/hapdiff/tags); [DockerHub](https://hub.docker.com/r/mkolmogo/hapdup/tags); and [DockerHub](https://hub.docker.com/repository/docker/nyagam/dasva/tags) that contains all the tools/softwares required by the pipeline, making results highly reproducible.
+
+# Installation and Usage:
+```bash
+$ git clone https://github.com/NyagaM/DASVA.git
+
+```
+To view usage and run options:
+
+```bash
+$ nextflow run DASVA/main.nf --output_dir ./ --help
+```
+Profiles:
+```bash
+-profile docker or -profile singularity; (for slurm) -profile slurm,singularity or -profile slurm,docker; or -profile awsbatch (not fully tested yet)
+```
+```bash
+Usage: nextflow run main.nf [options]
+
+Options:
+  --input_fastqs   Path to folder containing fastqs files (required or provide a BAM file to be converted to fastq using `--input_bam`)
+  --sample_name    Name of the sample (required)
+  --output_dir     Output directory (required)
+  --reference      Reference fasta for sv calling on the diploid assemblies (required)
+  --input_bam      Input BAM file to convert to fastq (optional)
+  --mapped_bam     A BAM file of the original long reads realigned on the haploid assembly (optional)
+  --annotationsDir Path to AnnotSV annotation directory (optional), otherwise annotation of diploid SVs will be skipped
+  --haploid_fasta  Haploid assembly to be converted to diploid assembly (optional)
+  --help           Print this help message
+```
