@@ -7,288 +7,286 @@ def helpMessage = """
 Usage: nextflow run main.nf [options]
 
 Options:
-  --input_fastqs   Path to folder containing fastqs files (required)
-  --sample_name    Name of the sample (required)
-  --output_dir     Output directory (required)
-  --reference      Reference fasta for sv calling on the diploid assemblies (required)
-  --input_bam      Input BAM file to convert to fastq (optional)
-  --mapped_bam     A BAM file of the original long reads realigned on the haploid assembly (optional)
-  --annotationsDir Path to AnnotSV annotation directory (optional), otherwise annotation of diploid SVs will be skipped
-  --haploid_fasta  Haploid assembly to be converted to diploid assembly (optional)
-  --help           Print this help message
+  --input_fastqs    Path to folder containing fastqs files (required unless --input_bam or --mapped_bam provided)
+  --sample_name     Name of the sample (required)
+  --output_dir      Output directory (required)
+  --reference       Reference fasta for sv calling on the diploid assemblies (optional, skips SV calling if omitted)
+  --input_bam       Input BAM file to convert to fastq (optional)
+  --mapped_bam      A BAM of reads aligned to the haploid assembly (for diploid assembly or for Medaka polishing)
+  --annotationsDir  Path to AnnotSV annotation directory (optional), otherwise annotation of diploid SVs will be skipped
+  --haploid_fasta   Haploid assembly to be converted to diploid assembly (optional)
+  --flye_raw        Use the --nano-raw flag for Flye haploid assembly (optional)
+  --flye_hq         Use the --nano-hq flag for Flye haploid assembly (default: true)
+  --hifiasm         Use the --hifiasm flag to use hifiasm assembler (default: false)
+  --medaka_polish   Run Medaka polishing on the haploid assembly prior to diploid assembly (optional)
+  --medaka_model    Medaka model to use (default: r1041_e82_400bps_sup_v5.2.0)
+  --busco_lineage   BUSCO lineage (e.g. primates_odb12, carnivora_odb12)
+  --busco_dataset   Path to BUSCO lineage dataset
+  --help            Print this help message
 """
 
-params.input_fastqs = ""
-params.sample_name = ""
-params.output_dir = ""
-params.reference = ""
-params.input_bam = false
-params.mapped_bam = false
+params.input_fastqs   = ""
+params.sample_name    = ""
+params.output_dir     = ""
+params.reference      = false
+params.input_bam      = false
+params.mapped_bam     = false
 params.annotationsDir = false
-params.haploid_fasta = false
-params.help = false
+params.haploid_fasta  = false
+params.flye_raw       = false
+params.flye_hq        = true
+params.hifiasm        = false
+params.medaka_polish  = false
+params.medaka_model   = "r1041_e82_400bps_sup_v5.2.0"
+params.busco_lineage  = false
+params.busco_dataset  = false
+params.help           = false
 
-// Help condition check
-if (params.help || 
-    !params.sample_name || 
-    !params.reference || 
+// Help / validation check
+if (params.help ||
+    !params.sample_name ||
     !params.output_dir ||
     (!params.input_fastqs && !params.input_bam && !(params.mapped_bam && params.haploid_fasta))) {
-  println helpMessage
+  log.info helpMessage
   exit 0
 }
 
-// Check if output directory exists
+// Check / create output directory
 def outputDir = file(params.output_dir)
 if (outputDir.exists()) {
-    println "Output directory exists: ${params.output_dir}"
+    log.info "Output directory exists: ${params.output_dir}"
 } else {
-    println "Output directory does not exist. Creating one: ${params.output_dir}"
+    log.info "Output directory does not exist. Creating: ${params.output_dir}"
     outputDir.mkdirs()
 }
 
-// Input channels
-input_ch = params.input_fastqs ? Channel.fromPath(params.input_fastqs, checkIfExists: true) : Channel.empty()
+// Include processes
+include { haploid_assembly_raw } from './workflows/haploid.nf'
+include { haploid_assembly_hq } from './workflows/haploid.nf'
+include { diploid_sv } from './workflows/diploid_sv.nf'
+include { annotate_diploidSV } from './workflows/diploid_sv.nf'
+include { busco_qc } from './workflows/metrics.nf'
+include { busco_qc_polished } from './workflows/metrics.nf'
+include { busco_qc_hap1 } from './workflows/metrics.nf'
+include { busco_qc_hap2 } from './workflows/metrics.nf'
+include { quast_metrics } from './workflows/metrics.nf'
+include { medaka_align } from './workflows/polish.nf'
+include { medaka_inference } from './workflows/polish.nf'
+include { medaka_sequence } from './workflows/polish.nf'
+include { bam2fq } from './workflows/preprocess.nf'
+include { concat_fastqs } from './workflows/preprocess.nf'
+include { split_fasta } from './workflows/preprocess.nf'
+include { minimap2_alignment } from './workflows/diploid.nf'
+include { diploid_assembly } from './workflows/diploid.nf'
+include { hifiasm_assembly } from './workflows/hifiasm.nf'
 
-process bam2fq {
-  label 'bam2fq'
-  label 'process_medium'
-  publishDir "${params.output_dir}/raw_reads", mode: 'copy'
+// ---------------------------------------------------------------------------
+// SUB-WORKFLOWS
+// ---------------------------------------------------------------------------
 
-
-  input:
-    path bam
-    path bai
-
-  output:
-    path("${params.sample_name}.fastq.gz"), emit: converted_fastq
-    path("${params.sample_name}.bam2fq.log"), emit: log_file
-
-  script:
-  """
-  # Create a log file
-  LOG_FILE="${params.sample_name}.bam2fq.log"
-  
-  # Process BAM to FASTQ
-  echo "Starting BAM to FASTQ conversion..." > \$LOG_FILE
-  samtools bam2fq -n ${bam} | bgzip -@ ${task.cpus} > ${params.sample_name}.fastq.gz
-  
-  # Check .command.log for errors
-  echo "Conversion completed. Checking integrity of FASTQ file..." >> \$LOG_FILE
-  if grep -q "failed\\|error" .command.log; then
-    echo "EXITING: errors detected in BAM to FASTQ conversion. Check .command.log in work dir for further details." >> \$LOG_FILE
-    exit 1
-  else
-    echo "Conversion completed successfully." >> \$LOG_FILE
-  fi
-  """
+workflow get_fastq {
+  main:
+    if (params.input_bam) {
+      bam_file = file(params.input_bam)
+      bam2fq(bam_file)
+      fastq_ch = bam2fq.out.converted_fastq
+    } else {
+      fastq_files = Channel.fromPath("${params.input_fastqs}/*.fastq.gz").collect()
+      concat_fastqs(fastq_files)
+      fastq_ch = concat_fastqs.out.concat_fastq
+    }
+  emit:
+    fastq = fastq_ch
 }
 
-process concat_fastqs {
-  label 'process_low'
-  publishDir "${params.output_dir}/raw_reads", mode: 'copy'
+workflow run_diploid {
+  take:
+    fasta_ch
+    fastq_ch
+    provided_bam_ch
+    provided_bai_ch
 
-  input:
-    path fastq_files
+  main:
+    if (!provided_bam_ch) {
+      minimap2_alignment(fasta_ch, fastq_ch)
+      final_bam = minimap2_alignment.out.bam
+      final_bai = minimap2_alignment.out.bai
+    } else {
+      final_bam = provided_bam_ch
+      final_bai = provided_bai_ch
+    }
 
-  output:
-    path("${params.sample_name}.fastq.gz"), emit: concat_fastq
+    diploid_assembly(fasta_ch, final_bam, final_bai)
 
-  script:
-  """
-  cat ${fastq_files.join(' ')} > ${params.sample_name}.fastq.gz
-  """
+    if (params.busco_lineage) {
+      busco_qc_hap1(diploid_assembly.out.hapdup_dual_1)
+      busco_qc_hap2(diploid_assembly.out.hapdup_dual_2)
+    }
+
+    quast_metrics(
+      diploid_assembly.out.hapdup_dual_1,
+      diploid_assembly.out.hapdup_dual_2
+    )
+
+    if (params.reference) {
+      diploid_sv(
+        diploid_assembly.out.hapdup_dual_1,
+        diploid_assembly.out.hapdup_dual_2,
+        file(params.reference)
+      )
+      if (params.annotationsDir) {
+        annotate_diploidSV(diploid_sv.out.phased_vcf)
+      }
+    }
 }
 
-process haploid_assembly {
-  label 'flye'
-  label 'process_high'
-  publishDir "${params.output_dir}/haploid_assembly", mode: 'copy'
-
-  input:
-    path fastq
-
-  output:
-    path("assembly.fasta"), emit: haploid_fasta
-    path("assembly_graph.gfa"), emit: haploid_gfa
-    path("flye.log"), emit: log
-    path("assembly_info.txt"), emit: assembly_info
-
-  script:
-  """
-  #flye --nano-hq ${fastq} --out-dir ./ --threads ${task.cpus} --iterations 1
-  flye --nano-raw ${fastq} --out-dir ./ --threads ${task.cpus} --iterations 1
-  #rm -rf 40-polishing 30-contigger 20-repeat 10-consensus 00-assembly 
-  """
-}
-
-process minimap2_alignment {
-  label 'minimap2'
-  label 'process_medium'
-  publishDir "${params.output_dir}/alignment", mode: 'copy'
-
-  input:
-    path fasta
-    path fastq
-
-  output:
-    path("${params.sample_name}_mapping.bam"), emit: bam
-    path("${params.sample_name}_mapping.bam.bai"), emit: bai
-
-  script:
-  """
-  minimap2 -ax map-ont -t 48 ${fasta} ${fastq} | samtools sort -@ 12 > ${params.sample_name}_mapping.bam
-  samtools index -@ 12 ${params.sample_name}_mapping.bam
-  """
-}
-
-process diploid_assembly {
-  label 'hapdup'
-  label 'process_high'
-  publishDir "${params.output_dir}/diploid_assembly", mode: 'copy'
-
-
-  input:
-    path fasta
-    path bam
-    path bai
-
-  output:
-    path("hapdup_dual_1.fasta"), emit: hapdup_dual_1
-    path("hapdup_dual_2.fasta"), emit: hapdup_dual_2
-    path("hapdup.log"), emit: log
-    path("filtered.bam*"), emit: bam_and_bai
-
-  script:
-  """
-  hapdup --assembly ${fasta} --bam ${bam} --out-dir ./ -t ${task.cpus} --rtype ont
-  """
-}
-
-process assembly_metrics {
-  label 'quast'
-  label 'process_low'
-  publishDir "${params.output_dir}/diploid_assembly/assembly_metrics", mode: 'copy'
-
-  input:
-    path hapdup_dual_1
-    path hapdup_dual_2
-
-  output:
-    path("report.pdf"), emit: pdf
-    path("report.tsv"), emit: tsv
-    path("report.html"), emit: html
-    path("quast.log"), emit: log
-
-  script:
-  """
-  quast.py ${hapdup_dual_1} ${hapdup_dual_2} -o ./ -t ${task.cpus} 
-  """
-}
-
-process diploid_sv {
-  label 'hapdiff'
-  label 'process_medium'
-  publishDir "${params.output_dir}/diploid_assembly_SVs", mode: 'copy'
-
-  input:
-    path hapdup_dual_1
-    path hapdup_dual_2
-    path reference
-
-  output:
-    path("hapdiff_phased.vcf.gz"), emit: phased_vcf
-    path("hapdiff_phased.vcf.gz.tbi"), emit: phased_vcf_index
-    path("hapdiff_unphased.vcf.gz"), emit: unphased_vcf
-    path("hapdiff_unphased.vcf.gz.tbi"), emit: unphased_vcf_index
-    path("*.bam*"), emit: bams
-    path("*.log"), emit: logs
-
-  script:
-  """
-  hapdiff.py --reference ${reference} \
-    --pat ${hapdup_dual_1} \
-    --mat ${hapdup_dual_2} \
-    --out-dir ./ \
-    -t ${task.cpus}
-  """
-}
-
-process annotate_diploidSV {
-    label 'annotsv'
-    label 'process_low'
-    publishDir "${params.output_dir}/diploid_assembly_SVs/annotsv", mode: 'copy'
-    
-    input:
-    path phased_vcf
-    
-    output:
-    path("*AnnotSV*"), emit: tsv_and_log
-
-    script:
-    """
-    AnnotSV \
-        -annotationsDir ${params.annotationsDir} \
-        -SVinputFile ${phased_vcf} \
-        -outputFile ${params.sample_name}.annotsv.tsv \
-        -snvIndelPASS 1 \
-        -SVminSize 50 \
-        -genomeBuild GRCh38 \
-        > ${params.sample_name}.annotsv.log
-    """
-}
+// ---------------------------------------------------------------------------
+// MAIN WORKFLOW
+// ---------------------------------------------------------------------------
 
 workflow {
-    // Start directly at diploid_assembly if both mapped_bam and haploid_fasta are provided
-    if (params.mapped_bam && params.haploid_fasta) {
-        println("Mapped bam and haploid fasta provided, starting from diploid assembly...")
-        
-        mapped_bam_file = file(params.mapped_bam)
-        mapped_bai_file = file("${params.mapped_bam}.bai")
-        haploid_fasta = file(params.haploid_fasta)
-        
-        diploid_assembly_results = diploid_assembly(haploid_fasta, mapped_bam_file, mapped_bai_file)
-        assembly_metrics_results = assembly_metrics(diploid_assembly_results.hapdup_dual_1, diploid_assembly_results.hapdup_dual_2)
-        diploid_sv_results = diploid_sv(diploid_assembly_results.hapdup_dual_1, diploid_assembly_results.hapdup_dual_2, file(params.reference))
-        
-        if (params.annotationsDir) {
-            annotate_diploidSV_results = annotate_diploidSV(diploid_sv_results.phased_vcf)
-        } else {
-            println("--annotationsDir not provided: Skipping AnnotSV annotation of diploid SVs")
-        }
-    } 
-    else {
-        // Original workflow logic when mapped_bam and haploid_fasta are not both provided
-        if (params.input_bam) {
-            // BAM input path
-            bam_file = file(params.input_bam)
-            bai_file = file("${params.input_bam}.bai")
-            bam2fq_results = bam2fq(bam_file, bai_file)
-            input_fastq = bam2fq_results.converted_fastq
-        } else {
-            // FASTQ input path
-            fastq_files = Channel.fromPath("${params.input_fastqs}/*.fastq.gz").collect()
-            concat_fastqs_results = concat_fastqs(fastq_files)
-            input_fastq = concat_fastqs_results.concat_fastq
-        }
-        
-        if (params.haploid_fasta) {
-            minimap2_alignment_results = minimap2_alignment(file(params.haploid_fasta), input_fastq)
-            haploid_fasta = file(params.haploid_fasta)
-        } else {
-            haploid_assembly_results = haploid_assembly(input_fastq)
-            minimap2_alignment_results = minimap2_alignment(haploid_assembly_results.haploid_fasta, input_fastq)
-            haploid_fasta = haploid_assembly_results.haploid_fasta
-        }
-        
-        diploid_assembly_results = diploid_assembly(haploid_fasta, minimap2_alignment_results.bam, minimap2_alignment_results.bai)
-        assembly_metrics_results = assembly_metrics(diploid_assembly_results.hapdup_dual_1, diploid_assembly_results.hapdup_dual_2)
-        diploid_sv_results = diploid_sv(diploid_assembly_results.hapdup_dual_1, diploid_assembly_results.hapdup_dual_2, file(params.reference))
 
-        if (params.annotationsDir) {
-            annotate_diploidSV_results = annotate_diploidSV(diploid_sv_results.phased_vcf)
-        } else {
-            println("--annotationsDir not provided: Skipping AnnotSV annotation of diploid SVs")
-        }
+  // Guard: hifiasm is incompatible with medaka polishing and hapdup diploid assembly
+  if (params.hifiasm && params.medaka_polish) {
+    log.error "ERROR: --hifiasm is incompatible with --medaka_polish. Hifiasm produces a native diploid assembly and does not require polishing or hapdup."
+    exit 1
+  }
+  if (params.hifiasm && params.mapped_bam) {
+    log.error "ERROR: --hifiasm is incompatible with --mapped_bam. Hifiasm runs directly from raw FASTQs and produces its own diploid assembly."
+    exit 1
+  }
+  if (params.hifiasm && params.haploid_fasta) {
+    log.error "ERROR: --hifiasm is incompatible with --haploid_fasta. Hifiasm runs directly from raw FASTQs and produces its own diploid assembly."
+    exit 1
+  }
+
+  // Situation A: Medaka polishing with supplied FASTA and BAM (no raw FASTQs)
+  if (params.haploid_fasta && params.medaka_polish && params.mapped_bam) {
+    log.info "Starting Medaka polishing using supplied Assembly and BAM (Skipping Flye and Alignment)"
+
+    haploid_fasta_ch = Channel.value(file(params.haploid_fasta))
+    mapped_bam_ch    = Channel.value(file(params.mapped_bam))
+    mapped_bai_ch    = Channel.value(file("${params.mapped_bam}.bai"))
+
+    split_fasta(haploid_fasta_ch)
+    batch_ch = split_fasta.out.batch_files.flatten()
+
+    medaka_inference(
+      haploid_fasta_ch,
+      mapped_bam_ch,
+      mapped_bai_ch,
+      batch_ch
+    )
+
+    hdf_collected = medaka_inference.out.hdf.collect()
+    medaka_sequence(haploid_fasta_ch, hdf_collected)
+
+    fasta_ch = medaka_sequence.out.polished_fasta
+
+    if (params.busco_lineage) {
+      busco_qc_polished(fasta_ch)
     }
+
+    // No raw FASTQs available — reuse supplied BAM with polished FASTA for diploid
+    run_diploid(fasta_ch, Channel.empty(), mapped_bam_ch, mapped_bai_ch)
+
+  // Situation B: Diploid assembly directly from supplied FASTA and BAM (no polishing)
+  } else if (params.mapped_bam && params.haploid_fasta) {
+    log.info "Starting directly from Diploid Assembly using supplied BAM and FASTA"
+
+    fasta_ch = Channel.value(file(params.haploid_fasta))
+    bam_ch   = Channel.value(file(params.mapped_bam))
+    bai_ch   = Channel.value(file("${params.mapped_bam}.bai"))
+
+    if (params.busco_lineage) {
+      busco_qc(fasta_ch)
+    }
+
+    run_diploid(fasta_ch, Channel.empty(), bam_ch, bai_ch)
+
+  // Situation C: Full workflow from raw FASTQs
+  } else {
+    get_fastq()
+    fastq_ch = get_fastq.out.fastq
+
+    // Situation C1: Hifiasm — natively diploid, skip medaka and hapdup entirely
+    if (params.hifiasm) {
+      log.info "Running hifiasm diploid assembly (skipping Medaka and hapdup)"
+
+      hifiasm_assembly(fastq_ch)
+
+      if (params.busco_lineage) {
+        busco_qc_hap1(hifiasm_assembly.out.hap1_fasta)
+        busco_qc_hap2(hifiasm_assembly.out.hap2_fasta)
+      }
+
+      quast_metrics(
+        hifiasm_assembly.out.hap1_fasta,
+        hifiasm_assembly.out.hap2_fasta
+      )
+
+      if (params.reference) {
+        diploid_sv(
+          hifiasm_assembly.out.hap1_fasta,
+          hifiasm_assembly.out.hap2_fasta,
+          file(params.reference)
+        )
+        if (params.annotationsDir) {
+          annotate_diploidSV(diploid_sv.out.phased_vcf)
+        }
+      }
+
+    // Situation C2: Flye haploid assembly with optional Medaka polishing and hapdup diploid
+    } else {
+      if (params.haploid_fasta) {
+        log.info "Using supplied haploid assembly"
+        fasta_ch = Channel.value(file(params.haploid_fasta))
+      } else {
+        if (params.flye_raw) {
+          log.info "Running haploid assembly with --nano-raw (Flye)"
+          haploid_assembly_raw(fastq_ch)
+          fasta_ch = haploid_assembly_raw.out.haploid_fasta
+        } else {
+          log.info "Running haploid assembly with --nano-hq (Flye) [default]"
+          haploid_assembly_hq(fastq_ch)
+          fasta_ch = haploid_assembly_hq.out.haploid_fasta
+        }
+
+        if (params.busco_lineage) {
+          busco_qc(fasta_ch)
+        }
+      }
+
+      if (params.medaka_polish) {
+        log.info "Running Medaka polishing on haploid assembly"
+
+        split_fasta(fasta_ch)
+        batch_ch = split_fasta.out.batch_files.flatten()
+
+        medaka_align(fasta_ch, fastq_ch)
+
+        medaka_inference(
+          fasta_ch,
+          medaka_align.out.bam,
+          medaka_align.out.bai,
+          batch_ch
+        )
+
+        hdf_collected = medaka_inference.out.hdf.collect()
+        medaka_sequence(fasta_ch, hdf_collected)
+
+        fasta_ch = medaka_sequence.out.polished_fasta
+
+        if (params.busco_lineage) {
+          busco_qc_polished(fasta_ch)
+        }
+
+        // Fresh minimap2 alignment against polished assembly for diploid
+        run_diploid(fasta_ch, fastq_ch, null, null)
+
+      } else {
+        run_diploid(fasta_ch, fastq_ch, null, null)
+      }
+    }
+  }
 }
