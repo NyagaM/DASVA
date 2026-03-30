@@ -1,3 +1,4 @@
+//
 process minimap2_alignment {
   label 'minimap2'
   label 'process_medium'

@@ -1,7 +1,8 @@
-// busco
+// busco and quast
 process busco_qc {
   label 'busco'
-  cpus 16
+  cpus 12
+  memory '16 GB'
   errorStrategy = 'ignore'
   publishDir "${params.output_dir}/busco_qc", mode: 'copy'
 
@@ -14,6 +15,8 @@ process busco_qc {
 
   script:
   """
+  export _JAVA_OPTIONS="-Xmx16g"
+
   busco \\
     -i ${fasta} \\
     -l ${params.busco_lineage} \\
@@ -27,7 +30,8 @@ process busco_qc {
 
 process busco_qc_polished {
   label 'busco'
-  cpus 16
+  cpus 12
+  memory '16 GB'
   errorStrategy = 'ignore'
   publishDir "${params.output_dir}/busco_qc_polished", mode: 'copy'
 
@@ -40,6 +44,8 @@ process busco_qc_polished {
 
   script:
   """
+  export _JAVA_OPTIONS="-Xmx16g"
+
   busco \\
     -i ${fasta} \\
     -l ${params.busco_lineage} \\
@@ -55,6 +61,7 @@ process busco_qc_hap1 {
   label 'busco'
   cpus 12
   memory '16 GB'
+  errorStrategy = 'ignore'
   publishDir "${params.output_dir}/diploid_assembly/assembly_metrics/busco_qc_hap1", mode: 'copy'
 
   input:
@@ -83,6 +90,7 @@ process busco_qc_hap2 {
   label 'busco'
   cpus 12
   memory '16 GB'
+  errorStrategy = 'ignore'
   publishDir "${params.output_dir}/diploid_assembly/assembly_metrics/busco_qc_hap2", mode: 'copy'
 
   input:

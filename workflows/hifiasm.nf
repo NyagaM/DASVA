@@ -1,3 +1,4 @@
+//hifiasm
 process hifiasm_assembly {
   label 'hifiasm'
   label 'process_high'
